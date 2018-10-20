@@ -4,7 +4,8 @@ from datetime import datetime, timezone, date
 from uuid import UUID
 
 from json_serde.serde import JsonSerde, String, Float, Integer, Boolean, List, Nested, Field, \
-        IsoDateTime, Uuid, IsoDate
+        IsoDateTime, Uuid, IsoDate, SerdeError
+from json_serde._utils import Absent
 
 
 def test_string():
@@ -17,7 +18,7 @@ def test_string():
     assert foo.to_json() == out
     assert Foo.from_json(out) == foo
 
-    with pytest.raises(TypeError):
+    with pytest.raises(SerdeError):
         Foo.from_json({'bar': 123})
 
 
@@ -30,7 +31,7 @@ def test_int():
     assert foo.to_json() == out
     assert Foo.from_json(out) == foo
 
-    with pytest.raises(TypeError):
+    with pytest.raises(SerdeError):
         Foo.from_json({'bar': '1312'})
 
 
@@ -43,7 +44,7 @@ def test_boolean():
     assert foo.to_json() == out
     assert Foo.from_json(out) == foo
 
-    with pytest.raises(TypeError):
+    with pytest.raises(SerdeError):
         Foo.from_json({'bar': 'true'})
 
 
@@ -61,7 +62,7 @@ def test_float():
     assert foo.to_json() == out
     assert Foo.from_json(out) == foo
 
-    with pytest.raises(TypeError):
+    with pytest.raises(SerdeError):
         Foo.from_json({'bar': '123'})
 
 
@@ -77,6 +78,9 @@ def test_uuid():
 
     out = {'bar': uuid_str.upper()}
     assert Foo.from_json(out) == foo
+
+    with pytest.raises(SerdeError):
+        Foo.from_json({'bar': '123'})
 
 
 def test_datetime():
@@ -101,6 +105,9 @@ def test_datetime():
         out = {'bar': dt}
         assert Foo.from_json(out) == foo
 
+    with pytest.raises(SerdeError):
+        Foo.from_json({'bar': '123'})
+
     class Bar(JsonSerde):
         baz = IsoDateTime(is_optional=True)
 
@@ -119,7 +126,7 @@ def test_validator():
 
     def more_than_three(self, x) -> None:
         if x <= 3:
-            raise ValueError(MSG)
+            raise SerdeError(MSG)
 
     class Foo(JsonSerde):
         bar = Integer(validators=[more_than_three])
@@ -127,7 +134,7 @@ def test_validator():
     foo = Foo(4)
     assert foo.bar == 4
 
-    with pytest.raises(ValueError) as e:
+    with pytest.raises(SerdeError) as e:
         Foo(2)
     assert str(e.value) == MSG
 
@@ -136,13 +143,13 @@ def test_optional():
     class Foo(JsonSerde):
         foo = String()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(SerdeError):
         Foo(None)
 
     class Foo(JsonSerde):
         foo = String(is_optional=True)
 
-    foo = Foo()
+    foo = Foo(foo=Absent)
     assert foo.to_json() == {}
     assert foo.from_json({}) == foo
     assert Foo.from_json({'foo': 'foo'}) == Foo('foo')
@@ -249,6 +256,7 @@ def test_field_counter():
     assert f2.counter > f1.counter
 
     # be damn sure that we don't have non-determinism in anything
+    # (only works in python < 3.6)
     json = {chr(x): chr(x) for x in range(97, 105)}
     for _ in range(1000):
         class Foo(JsonSerde):
@@ -279,16 +287,15 @@ def test_field():
     with pytest.raises(NotImplementedError):
         f.from_json('wat')
 
-    f.validate('wat')
     repr(f)
 
 
-def test_write_optional():
+def test_write_null():
     with pytest.raises(ValueError):
-        Field(is_optional=False, write_optional=True)
+        Field(is_optional=False, write_null=True)
 
     class Foo(JsonSerde):
-        wat = String(is_optional=True, write_optional=True)
+        wat = String(is_optional=True, write_null=True)
 
     f = Foo(wat=None)
     assert f.to_json()['wat'] is None
@@ -317,8 +324,17 @@ def test_nested_none():
         foo = String()
 
     class Outer(JsonSerde):
-        inner = Nested(Inner, is_optional=True, write_optional=True)
+        inner = Nested(Inner, is_optional=True, write_null=True)
 
     outer = Outer(inner=None)
     jsn = outer.to_json()
     assert jsn['inner'] is None
+
+
+def test_absent():
+    class Foo(JsonSerde):
+        foo = String(is_optional=True, write_absent=True)
+
+    foo = Foo(foo=Absent)
+    out = {'foo': None}
+    assert foo.to_json() == out

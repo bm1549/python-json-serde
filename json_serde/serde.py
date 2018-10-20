@@ -11,6 +11,13 @@ from collections import OrderedDict
 from datetime import datetime, timezone, date
 from uuid import UUID
 
+from ._utils import Absent
+
+
+class SerdeError(Exception):
+
+    pass
+
 
 class Field:
     '''Base class for a field that should be de/serialized in a class.
@@ -18,24 +25,37 @@ class Field:
 
     __COUNTER = 0
 
-    def __init__(self, is_optional: bool=False, validators: list=None, rename=None,
-                 write_optional: bool=False):
-        ''':param is_optional: If the field is allowed to be missing/``null``/``None``.
+    def __init__(self,
+                 is_optional: bool=False,
+                 validators: list=None,
+                 rename=None,
+                 write_null: bool=False,
+                 write_absent: bool=False,
+                 default=Absent):
+        ''':param is_optional: If the field is allowed to be ``null``/``None``/``Absent``.
            :param validators: List of functions taking ``(self, value)`` as args. **MUST** raise
-               an ``Exception`` if they fail.
+               a ``SerdeError`` if they fail.
            :param rename: A different name for the JSON field.
-           :param write_optional: Whether optional values should be written to the JSON object.
+           :param write_null: Whether null values should be written to the JSON object.
+           :param write_absent: Whether absent values shoudl be writtne to the JSON object as null.
+           :param default: Provide a default value when the value is absernt. Can be a value or
+               a ``callable``.
         '''
         self.counter = Field.__COUNTER
         Field.__COUNTER += 1
 
-        if not is_optional and write_optional:
-            raise ValueError("Cannot set 'write_optional' on a field with 'is_optional=False'")
+        if not is_optional and write_null:
+            raise ValueError("Cannot have 'is_optional=False' and 'write_null=True'")
+
+        if not is_optional and write_absent:
+            raise ValueError("Cannot have 'is_optional=False' and 'write_absent=True'")
 
         self.is_optional = is_optional
         self.validators = validators or []
         self.rename = rename
-        self.write_optional = write_optional
+        self.write_null = write_null
+        self.write_absent = write_absent
+        self.default = default
 
     def from_json(self, value):
         '''Create an instance of this class from a JSON value.
@@ -47,11 +67,6 @@ class Field:
         '''
         raise NotImplementedError
 
-    def validate(self, value) -> None:
-        '''Run a validation against the parsed value.
-        '''
-        pass
-
     def __repr__(self) -> str:
         return ('<Field counter={} is_optional={} validators={} rename={!r}>'
                 .format(self.counter, self.is_optional, len(self.validators), self.rename))
@@ -62,14 +77,12 @@ class String(Field):
     '''
 
     def from_json(self, value) -> str:
+        if not isinstance(value, str):
+            raise SerdeError("Expected a string.")
         return value
 
     def to_json(self, value: str) -> str:
         return value
-
-    def validate(self, value) -> None:
-        if not isinstance(value, str):
-            raise TypeError("Expected 'str' but got {!r}".format(value.__class__.__name__))
 
 
 class Integer(Field):
@@ -77,14 +90,12 @@ class Integer(Field):
     '''
 
     def from_json(self, value) -> int:
+        if not isinstance(value, int):
+            raise SerdeError("Expected an integer.")
         return value
 
     def to_json(self, value: int) -> int:
         return value
-
-    def validate(self, value) -> None:
-        if not isinstance(value, int):
-            raise TypeError("Expected 'int' but got {!r}".format(value.__class__.__name__))
 
 
 class Boolean(Field):
@@ -92,14 +103,12 @@ class Boolean(Field):
     '''
 
     def from_json(self, value) -> bool:
+        if not isinstance(value, bool):
+            raise SerdeError("Expected a boolean.")
         return value
 
     def to_json(self, value: bool) -> bool:
         return value
-
-    def validate(self, value) -> None:
-        if not isinstance(value, bool):
-            raise TypeError("Expected 'bool' but got {!r}".format(value.__class__.__name__))
 
 
 class Float(Field):
@@ -107,16 +116,14 @@ class Float(Field):
     '''
 
     def from_json(self, value) -> float:
+        if not isinstance(value, float) and not isinstance(value, int):
+            raise SerdeError("Expected a number.")
         if isinstance(value, int):
             value = float(value)
         return value
 
     def to_json(self, value: float) -> float:
         return value
-
-    def validate(self, value) -> None:
-        if not isinstance(value, float) and not isinstance(value, int):
-            raise TypeError("Expected 'float' but got {!r}".format(value.__class__.__name__))
 
 
 class IsoDateTime(Field):
@@ -145,7 +152,7 @@ class IsoDateTime(Field):
 
     def from_json(self, value: str) -> datetime:
         if not isinstance(value, str):
-            raise ValueError('Cannot parse {!r} as a date'.format(value))
+            raise SerdeError('Cannot parse as a date')
         if value.endswith('Z'):
             value = value[0:-1] + '+0000'
         else:
@@ -160,11 +167,7 @@ class IsoDateTime(Field):
                 return dt
             except ValueError:
                 pass
-        raise ValueError('Date had bad format: {}'.format(value))
-
-    def validate(self, value) -> None:
-        if not isinstance(value, datetime):
-            raise TypeError("Expected 'datetime' but got {!r}".format(value.__class__.__name__))
+        raise SerdeError('Illegal date format.')
 
 
 class IsoDate(Field):
@@ -180,15 +183,11 @@ class IsoDate(Field):
 
     def from_json(self, value: str) -> datetime:
         if not isinstance(value, str):
-            raise ValueError('Cannot parse {!r} as a date'.format(value))
+            raise SerdeError('Cannot parse as a date.')
         split = value.split('-')
         if len(split) != 3:
-            raise ValueError('Date had bad format: {}'.format(value))
+            raise SerdeError('Date had bad format.')
         return date(*[int(x) for x in split])
-
-    def validate(self, value) -> None:
-        if not isinstance(value, date):
-            raise TypeError("Expected 'date' but got {!r}".format(value.__class__.__name__))
 
 
 class Uuid(Field):
@@ -199,11 +198,12 @@ class Uuid(Field):
         return str(value)
 
     def from_json(self, value: str) -> UUID:
-        return UUID(value)
-
-    def validate(self, value) -> None:
-        if not isinstance(value, UUID):
-            raise TypeError("Expected 'UUID' but got {!r}".format(value.__class__.__name__))
+        if not isinstance(value, str):
+            raise SerdeError('Cannot parse as a UUID.')
+        try:
+            return UUID(value)
+        except ValueError:
+            raise SerdeError('UUID had bad format.')
 
 
 class List(Field):
@@ -223,11 +223,9 @@ class List(Field):
         return [v.to_json() for v in value]
 
     def from_json(self, value: list) -> list:
-        return [self.typ.from_json(v) for v in value]
-
-    def validate(self, value) -> None:
         if not isinstance(value, list):
-            raise TypeError("Expected 'list' but got {!r}".format(value.__class__))
+            raise TypeError('Expected a list.')
+        return [self.typ.from_json(v) for v in value]
 
 
 class Nested(Field):
@@ -249,10 +247,6 @@ class Nested(Field):
 
     def from_json(self, value):
         return self.typ.from_json(value)
-
-    def validate(self, value) -> None:
-        if not isinstance(value, self.typ):
-            raise TypeError("Expected {!r} but got {!r}".format(self.typ.__name__, value.__class__))
 
 
 class JsonSerdeMeta(type):
@@ -291,7 +285,7 @@ class JsonSerdeMeta(type):
         for name, field in fields.items():
             keyword = name
             if field.is_optional:
-                keyword += '=None'
+                keyword += '=Absent'
             args.append(keyword)
             init_lines.append('    self.{name} = {name}'.format(name=name))
 
@@ -309,7 +303,7 @@ class JsonSerdeMeta(type):
 
         locs = {}
         bytecode = compile('\n'.join(init_lines), filename, 'exec')
-        eval(bytecode, {}, locs)  # nosec
+        eval(bytecode, {'Absent': Absent}, locs)  # nosec
 
         linecache.cache[filename] = (
             len(init),
@@ -325,10 +319,12 @@ class JsonSerdeMeta(type):
         def to_json(self) -> dict:
             out = {}
             for name, field in fields.items():
-                val = field.to_json(getattr(self, name))
+                val = getattr(self, name)
                 rename = field.rename or name
-                if val is None and field.is_optional and not field.write_optional:
+                if (val is None and field.write_null) or (val is Absent and field.write_absent):
+                    out[rename] = None
                     continue
+                val = field.to_json(val)
                 out[rename] = val
             return out
         return to_json
@@ -341,21 +337,33 @@ class JsonSerdeMeta(type):
 
             for name, field in fields.items():
                 rename = field.rename or name
-                if rename in value:
+                if rename not in value:
+                    val = Absent
+                else:
                     val = value[rename]
-                    if field.is_optional:
+
+                if field.is_optional:
+                    if val is not None and val is not Absent:
                         kwargs[name] = field.from_json(val)
                     else:
-                        if isinstance(field, Nested):
+                        kwargs[name] = val
+                else:
+                    if isinstance(field, Nested):
+                        if val is not None and val is not Absent:
                             val = field.typ.from_json(val)
-                        elif isinstance(field, List):
-                            if not isinstance(val, list):
-                                raise TypeError(
-                                    "Expected 'list' but got {!r}".format(val.__class__.__name__))
-                            val = [field.typ.from_json(v) for v in val]
-                        else:
-                            val = field.from_json(val)
-                        nargs.append(val)
+                    elif isinstance(field, List):
+                        if not isinstance(val, list):
+                            raise TypeError(
+                                "Expected 'list' but got {!r}".format(val.__class__.__name__))
+                        def parser(v):
+                            if v is not None and v is not Absent:
+                                return field.typ.from_json(v)
+                            else:
+                                return v
+                        val = [parser(v) for v in val]
+                    else:
+                        val = field.from_json(val)
+                    nargs.append(val)
 
             return cls(*nargs, **kwargs)
         return classmethod(from_json)
@@ -401,11 +409,9 @@ class JsonSerdeMeta(type):
         def __validate(self) -> None:
             for name, field in fields.items():
                 value = getattr(self, name)
-                if value is None:
+                if value is None or value is Absent:
                     if not field.is_optional:
-                        raise ValueError('{} was None'.format(value))
-                else:
-                    field.validate(value)
+                        raise SerdeError('Field {!r} is required.'.format(value))
                 for validator in field.validators:
                     validator(self, value)
         return __validate
